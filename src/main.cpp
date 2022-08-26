@@ -1,13 +1,23 @@
+#define USE_SHT3X
+
 #include <pgmspace.h>
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
 #include "MAX7219.h"
 #include "Date.h"
+#ifdef USE_SHT3X
+#include "SHT3x.h"
+#endif
 
 const uint32_t WIFI_REPEAT = 30 * 1000; // 30 sec.
 const uint32_t NTP_UPDATE = 3600 * 8 * 1000; // 8 hour
 const uint32_t NTP_REPEAT = 30 * 1000; // 30 sec.
+
+const uint8_t MORNING_HOUR = 8;
+const uint8_t FULL_BRIGHTNESS = 4;
+const uint8_t EVENING_HOUR = 22;
+const uint8_t HALF_BRIGHTNESS = 0;
 
 const char WIFI_SSID[] PROGMEM = "YOUR_SSID";
 const char WIFI_PSWD[] PROGMEM = "YOUR_PSWD";
@@ -17,8 +27,12 @@ const int8_t NTP_TZ = 3; // GMT+3
 enum : uint8_t { MODE_IDLE, MODE_WIFI, MODE_NTP };
 
 MAX7219<D8, 4> display;
+#ifdef USE_SHT3X
+SHT3x<> *sht = nullptr;
+#endif
 volatile uint32_t wifi_next = 0;
 uint32_t ntp_time = 0;
+uint32_t ntp_last = 0;
 uint32_t ntp_next = 0;
 volatile uint8_t mode = MODE_IDLE;
 
@@ -40,7 +54,6 @@ static void wifiOnEvent(WiFiEvent_t event) {
       Serial.println(F("WiFi disconnected"));
       if (! ntp_time)
         display.noAnimate();
-//        display.noScroll();
       wifi_next = millis() + WIFI_REPEAT;
       break;
     case WIFI_EVENT_STAMODE_GOT_IP:
@@ -48,7 +61,6 @@ static void wifiOnEvent(WiFiEvent_t event) {
       Serial.println(F("WiFi connected"));
       if (! ntp_time)
         display.noAnimate();
-//        display.noScroll();
       wifi_next = 0;
       break;
     default:
@@ -76,7 +88,6 @@ static void wifiConnect(PGM_P ssid, PGM_P pswd) {
     if (! ntp_time) {
       display.printStr(0, 0, PSTR("WiFi"));
       display.animate(display.width() - 7, 0, 7, 8, 4, PROGRESS, 250);
-//      display.scroll(PSTR("Connecting to WiFi..."));
     }
   }
 }
@@ -130,16 +141,42 @@ static uint32_t ntpTime(PGM_P server, int8_t tz, uint32_t timeout = 1000, uint8_
   return 0;
 }
 
+static bool isEvening(uint8_t h) {
+  if (EVENING_HOUR > MORNING_HOUR) {
+    return (h < MORNING_HOUR) || (h >= EVENING_HOUR);
+  } else {
+    return (h >= EVENING_HOUR) && (h < MORNING_HOUR);
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   Serial.println();
 
+#ifdef USE_SHT3X
+  sht = new SHT3x<>();
+  sht->init();
+  if (! sht->begin()) {
+    delete sht;
+    sht = nullptr;
+    Serial.println(F("SHT3x not found!"));
+  }
+#endif
+
   display.init();
-  display.begin(3);
+  display.begin(HALF_BRIGHTNESS);
 //  display.scroll(PSTR("Hello!"));
   display.scroll(PSTR("\xC7\xE4\xF0\xE0\xE2\xF1\xF2\xE2\xF3\xE9\xF2\xE5!")); // "Здравствуйте!"
   delay(5000);
   display.clear();
+
+#ifdef USE_SHT3X
+  if (! sht) {
+    display.scroll(PSTR("\xCD\xE5\xF2 SHT3x!")); // "Нет SHT3x!"
+    delay(5000);
+    display.clear();
+  }
+#endif
 
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
@@ -155,9 +192,14 @@ void loop() {
     } else if (mode == MODE_NTP) {
       t = ntpTime(NTP_SERVER, NTP_TZ);
       if (t) {
-        ntp_time = t - millis() / 1000;
-        ntp_next = millis() + NTP_UPDATE;
+        ntp_time = t;
+        ntp_last = millis();
+        ntp_next = ntp_last + NTP_UPDATE;
         Serial.println(F("NTP updated"));
+        if (isEvening((t / 3600) % 24))
+          display.setBrightness(HALF_BRIGHTNESS);
+        else
+          display.setBrightness(FULL_BRIGHTNESS);
       } else {
         ntp_next = millis() + NTP_REPEAT;
         Serial.println(F("NTP fail!"));
@@ -168,23 +210,47 @@ void loop() {
   }
 
   if (ntp_time) {
-    t = ntp_time + millis() / 1000;
+    t = ntp_time + (millis() - ntp_last) / 1000;
     if (t % 60 < 50) {
-      char str[6];
+      char str[12];
+#ifdef USE_SHT3X
+      float tp, hm;
+#endif
       uint8_t h, m, s;
 
       parseEpochTime(t, &h, &m, &s);
-      sprintf_P(str, PSTR("%02u:%02u"), h, m);
-      t = (display.width() - display.strWidth(str)) / 2;
-      display.beginUpdate();
-      display.clear();
-      display.printStr(t, 0, str);
-      if (s & 0x01) {
-        str[2] = '\0';
-        display.drawPattern(t + display.strWidth(str) + display.FONT_GAP, 0, display.charWidth(':'), display.FONT_HEIGHT, (uint8_t)0);
+      if ((s <= 1) && (m == 0)) { // Beginning of hour
+        if (h == MORNING_HOUR)
+          display.setBrightness(FULL_BRIGHTNESS);
+        else if (h == EVENING_HOUR)
+          display.setBrightness(HALF_BRIGHTNESS);
       }
-      display.endUpdate();
-      delay(1000);
+#ifdef USE_SHT3X
+      tp = hm = NAN;
+      if (sht && (((s >= 10) && (s < 20)) || ((s >= 30) && (s < 40)))) {
+        sht->measure(&tp, &hm);
+      }
+      if ((! isnan(tp)) && (! isnan(hm))) {
+        sprintf_P(str, PSTR("%0.1f\xB0 %0.1f%%"), tp, hm);
+        display.scroll(str);
+        delay((10 - s % 10) * 1000);
+        display.noScroll();
+      } else {
+#endif
+        sprintf_P(str, PSTR("%02u:%02u"), h, m);
+        t = (display.width() - display.strWidth(str)) / 2;
+        display.beginUpdate();
+        display.clear();
+        display.printStr(t, 0, str);
+        if (s & 0x01) {
+          str[2] = '\0';
+          display.drawPattern(t + display.strWidth(str) + display.FONT_GAP, 0, display.charWidth(':'), display.FONT_HEIGHT, (uint8_t)0);
+        }
+        display.endUpdate();
+        delay(1000);
+#ifdef USE_SHT3X
+      }
+#endif
     } else {
       static const char WEEKDAYS[7][3] PROGMEM = {
         "\xCF\xED", "\xC2\xF2", "\xD1\xF0", "\xD7\xF2", "\xCF\xF2", "\xD1\xE1", "\xC2\xF1" // "Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"
@@ -197,7 +263,7 @@ void loop() {
       parseEpochDate(t, &w, &d, &m, &y);
       sprintf_P(str, PSTR("%S %02u.%02u.%u"), WEEKDAYS[w], d, m, y);
       display.scroll(str);
-      delay(10000);
+      delay((60 - t % 60) * 1000);
       display.noScroll();
     }
   }

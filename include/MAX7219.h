@@ -334,10 +334,12 @@ char MAX7219<CS_PIN, WIDTH, _SPI>::charNormalize(char c) {
   else if (c >= 127) {
     if (c == 168) // 'Ё'
       c = 127;
-    else if (c == 184) // 'ё'
+    else if (c == 176) // '°'
       c = 128;
+    else if (c == 184) // 'ё'
+      c = 129;
     else if (c >= 192) // 'А'
-      c -= 63;
+      c -= 62;
     else
       c = ' ';
   }
@@ -467,6 +469,7 @@ const uint8_t MAX7219<CS_PIN, WIDTH, _SPI>::FONT[] PROGMEM = {
   0x08, 0x04, 0x04, 0x08, 0x04, // '~'
 
   0x7C, 0x55, 0x54, 0x55, 0x44, // 'Ё'
+  0x02, 0x05, 0x02, // '°'
   0x38, 0x55, 0x54, 0x55, 0x18, // 'ё'
   0x7E, 0x11, 0x11, 0x11, 0x7E, // 'А'
   0x7F, 0x49, 0x49, 0x49, 0x33, // 'Б'
@@ -633,6 +636,7 @@ const uint8_t MAX7219<CS_PIN, WIDTH, _SPI>::CHAR_WIDTH[] PROGMEM = {
   5, // '~'
 
   5, // 'Ё'
+  3, // '°'
   5, // 'ё'
   5, // 'А'
   5, // 'Б'
