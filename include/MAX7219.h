@@ -225,7 +225,10 @@ void MAX7219<CS_PIN, WIDTH, _SPI>::scroll(const char *str, uint32_t tempo) {
   noScroll();
   w = strWidth(str);
   if (w <= width()) {
-    printStr(0, 0, str);
+    beginUpdate();
+    clear();
+    printStr((width() - w) / 2, 0, str);
+    endUpdate();
   } else {
     _scrolling = (scrolling_t*)malloc(sizeof(scrolling_t) + w);
     if (_scrolling) {

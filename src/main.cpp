@@ -1,74 +1,153 @@
+#define USE_SERIAL
 #define USE_SHT3X
+
+#define LED_PIN   2
+#define LED_LEVEL LOW
 
 #include <pgmspace.h>
 #include <Arduino.h>
+#include <FS.h>
+#include <LittleFS.h>
+#include <Ticker.h>
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
+#include <DNSServer.h>
+#include <ESPAsyncWebServer.h>
+#include "Parameters.h"
+#include "Logger.h"
+#ifdef LED_PIN
+#include "Leds.h"
+#endif
+#include "HtmlHelper.h"
+#include "Ntp.h"
+#include "ActionQueue.h"
 #include "MAX7219.h"
 #include "Date.h"
 #ifdef USE_SHT3X
 #include "SHT3x.h"
 #endif
 
-const uint32_t WIFI_REPEAT = 30 * 1000; // 30 sec.
-const uint32_t NTP_UPDATE = 3600 * 8 * 1000; // 8 hour
-const uint32_t NTP_REPEAT = 30 * 1000; // 30 sec.
+#ifdef LED_PIN
+#define LED_WIFI  LED_4HZ
+#ifdef USE_MQTT
+#define LED_MQTT  LED_2HZ
+#endif
+#define LED_IDLE  LED_05HZ
 
-const uint8_t MORNING_HOUR = 8;
-const uint8_t FULL_BRIGHTNESS = 4;
-const uint8_t EVENING_HOUR = 22;
-const uint8_t HALF_BRIGHTNESS = 0;
+#define LED_CP0   LED_4HZ
+#define LED_CP1   LED_2HZ
+#endif
 
-const char WIFI_SSID[] PROGMEM = "YOUR_SSID";
-const char WIFI_PSWD[] PROGMEM = "YOUR_PSWD";
-const char NTP_SERVER[] PROGMEM = "pool.ntp.org";
-const int8_t NTP_TZ = 3; // GMT+3
+#define CP_SSID "ESP_"
+#define CP_PSWD "1029384756"
 
-enum : uint8_t { MODE_IDLE, MODE_WIFI, MODE_NTP };
+//#define DEF_WIFI_SSID   "YOUR_SSID"
+//#define DEF_WIFI_PSWD   "YOUR_PSWD"
+#define DEF_ADM_NAME    "admin"
+#define DEF_ADM_PSWD    "12345678"
+#define DEF_NTP_SERVER  "pool.ntp.org"
+#define DEF_NTP_TZ      3
+#define DEF_NTP_INTERVAL  (3600 * 4)
 
+const uint8_t RST_CP = 3; // Reboot count to launch captive portal
+const uint8_t RST_RESET = 5; // Reboot count to clear configuration
+
+static const char PARAM_WIFI_SSID[] PROGMEM = "wifi_ssid";
+static const char PARAM_WIFI_PSWD[] PROGMEM = "wifi_pswd";
+static const char PARAM_ADM_NAME[] PROGMEM = "adm_name";
+static const char PARAM_ADM_PSWD[] PROGMEM = "adm_pswd";
+static const char PARAM_NTP_SERVER[] PROGMEM = "ntp_serv";
+static const char PARAM_NTP_TZ[] PROGMEM = "ntp_tz";
+static const char PARAM_NTP_INTERVAL[] PROGMEM = "ntp_inter";
+static const char PARAM_MORNING_HOUR[] PROGMEM = "morning_hour";
+static const char PARAM_MORNING_BRIGHT[] PROGMEM = "morning_bright";
+static const char PARAM_EVENING_HOUR[] PROGMEM = "evening_hour";
+static const char PARAM_EVENING_BRIGHT[] PROGMEM = "evening_bright";
+
+static const char URL_ROOT[] PROGMEM = "/";
+static const char URL_RESET[] PROGMEM = "/reset";
+static const char URL_RESTART[] PROGMEM = "/restart";
+static const char URL_OTA[] PROGMEM = "/ota";
+static const char URL_WIFI[] PROGMEM = "/wifi";
+static const char URL_NTP[] PROGMEM = "/ntp";
+static const char URL_LOG[] PROGMEM = "/log";
+
+const uint8_t TEXT_SIZE = 16;
+
+struct __attribute__((__packed__)) config_t {
+  char wifi_ssid[32 + 1];
+  char wifi_pswd[32 + 1];
+  char adm_name[32 + 1];
+  char adm_pswd[32 + 1];
+  char ntp_server[32 + 1];
+  int8_t ntp_tz;
+  uint16_t ntp_interval; // in sec.
+  uint8_t morning_hour;
+  uint8_t morning_bright;
+  uint8_t evening_hour;
+  uint8_t evening_bright;
+};
+
+Parameters<config_t> config;
+#ifdef USE_SERIAL
+Logger<> logger(&Serial);
+#else
+Logger<> logger();
+#endif
+#ifdef LED_PIN
+Leds<1> led;
+#endif
+Ticker wifiTimer;
+AsyncWebServer http(80);
+#ifdef USE_SHT3X
+ActionQueue<2> actions;
+#else
+ActionQueue<1> actions;
+#endif
 MAX7219<D8, 4> display;
 #ifdef USE_SHT3X
 SHT3x<> *sht = nullptr;
+float temp = NAN;
+float hum = NAN;
 #endif
-volatile uint32_t wifi_next = 0;
-uint32_t ntp_time = 0;
-uint32_t ntp_last = 0;
-uint32_t ntp_next = 0;
-volatile uint8_t mode = MODE_IDLE;
+volatile bool restarting = false;
 
-/*
-static void halt(const __FlashStringHelper *msg) {
-  Serial.println(msg);
+static void halt(const __FlashStringHelper *msg = nullptr) {
+#ifdef LED_PIN
+  led.setMode(0, led.LED_OFF);
+#endif
+#ifdef USE_SERIAL
+  if (msg)
+    Serial.println(msg);
   Serial.flush();
-  display.scroll((PGM_P)msg);
-  delay(5000);
-  display.end();
+#endif
   ESP.deepSleep(0);
 }
-*/
 
-static void wifiOnEvent(WiFiEvent_t event) {
-  switch (event) {
-    case WIFI_EVENT_STAMODE_DISCONNECTED:
-      mode = MODE_IDLE;
-      Serial.println(F("WiFi disconnected"));
-      if (! ntp_time)
-        display.noAnimate();
-      wifi_next = millis() + WIFI_REPEAT;
-      break;
-    case WIFI_EVENT_STAMODE_GOT_IP:
-      mode = MODE_NTP;
-      Serial.println(F("WiFi connected"));
-      if (! ntp_time)
-        display.noAnimate();
-      wifi_next = 0;
-      break;
-    default:
-      break;
-  }
+static void restart(const __FlashStringHelper *msg = nullptr) {
+#ifdef LED_PIN
+  led.setMode(0, led.LED_OFF);
+#endif
+#ifdef USE_SERIAL
+  if (msg)
+    Serial.println(msg);
+  Serial.flush();
+#endif
+  ESP.restart();
 }
 
-static void wifiConnect(PGM_P ssid, PGM_P pswd) {
+static void strlcpy_P(char *dest, PGM_P src, size_t size) {
+  strncpy_P(dest, src, size - 1);
+  dest[size - 1] = '\0';
+}
+
+static const char *strOrNull(const char *str) {
+  if (str && *str)
+    return str;
+  return nullptr;
+}
+
+static void wifiConnect() {
   static const uint8_t PROGRESS[] PROGMEM = {
     0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x50, 0x20, 0x40, 0x00, 0x00, 0x00, 0x00,
@@ -76,82 +155,688 @@ static void wifiConnect(PGM_P ssid, PGM_P pswd) {
     0x55, 0x25, 0x4A, 0x12, 0x64, 0x18, 0x60,
   };
 
-  if ((! wifi_next) || ((int32_t)(wifi_next - millis()) <= 0)) {
-    char _ssid[strlen_P(ssid) + 1];
-    char _pswd[strlen_P(pswd) + 1];
-
-    strcpy_P(_ssid, ssid);
-    strcpy_P(_pswd, pswd);
-    mode = MODE_WIFI;
-    WiFi.begin(_ssid, _pswd);
-    Serial.printf_P(PSTR("Connecting to \"%s\"...\n"), _ssid);
-    if (! ntp_time) {
-      display.printStr(0, 0, PSTR("WiFi"));
-      display.animate(display.width() - 7, 0, 7, 8, 4, PROGRESS, 250);
-    }
+  WiFi.begin(config->wifi_ssid, strOrNull(config->wifi_pswd));
+  logger.printf_P(PSTR("Connecting to \"%s\"...\n"), config->wifi_ssid);
+#ifdef LED_PIN
+  led.setMode(0, led.LED_WIFI);
+#endif
+  if (! ntpTime()) {
+    display.beginUpdate();
+    display.clear();
+    display.printStr(0, 0, PSTR("WiFi"));
+    display.endUpdate();
+    display.animate(display.width() - 7, 0, 7, 8, 4, PROGRESS, 250);
   }
 }
 
-static uint32_t ntpTime(PGM_P server, int8_t tz, uint32_t timeout = 1000, uint8_t repeat = 1) {
-  const uint16_t LOCAL_PORT = 55123;
+static void wifiOnEvent(WiFiEvent_t event) {
+  static const uint8_t CLOCK[] PROGMEM = {
+    0x1C, 0x22, 0x41, 0x4F, 0x49, 0x22, 0x1C
+  };
 
-  if (WiFi.isConnected()) {
-    WiFiUDP udp;
-
-    if (udp.begin(LOCAL_PORT)) {
-      char _server[strlen_P(server) + 1];
-
-      strcpy_P(_server, server);
-      do {
-        uint8_t buffer[48];
-
-        memset(buffer, 0, sizeof(buffer));
-        // Initialize values needed to form NTP request
-        buffer[0] = 0B11100011; // LI, Version, Mode
-        buffer[1] = 0; // Stratum, or type of clock
-        buffer[2] = 6; // Polling Interval
-        buffer[3] = 0xEC; // Peer Clock Precision
-        // 8 bytes of zero for Root Delay & Root Dispersion
-        buffer[12] = 49;
-        buffer[13] = 0x4E;
-        buffer[14] = 49;
-        buffer[15] = 52;
-        // all NTP fields have been given values, now
-        // you can send a packet requesting a timestamp
-        if (udp.beginPacket(_server, 123) && (udp.write(buffer, sizeof(buffer)) == sizeof(buffer)) && udp.endPacket()) {
-          uint32_t time = millis();
-          int cb;
-
-          while ((! (cb = udp.parsePacket())) && (millis() - time < timeout)) {
-            delay(1);
-          }
-          if (cb) {
-            time = millis() - time;
-            // We've received a packet, read the data from it
-            if (udp.read(buffer, sizeof(buffer)) == sizeof(buffer)) { // read the packet into the buffer
-              time = (((uint32_t)buffer[40] << 24) | ((uint32_t)buffer[41] << 16) | ((uint32_t)buffer[42] << 8) | buffer[43]) - 2208988800UL;
-              time += tz * 3600;
-              return time;
-            }
-          }
-        }
-      } while (repeat--);
-    }
+  switch (event) {
+    case WIFI_EVENT_STAMODE_DISCONNECTED:
+      if (! ntpTime()) {
+        display.noAnimate();
+        display.clear();
+      }
+      logger.println(F("WiFi disconnected"));
+      if (! restarting)
+        wifiTimer.once_ms(5000, wifiConnect);
+      http.end();
+#ifdef LED_PIN
+      led.setMode(0, led.LED_OFF);
+#endif
+      break;
+    case WIFI_EVENT_STAMODE_GOT_IP:
+      if (! ntpTime()) {
+        display.noAnimate();
+        display.beginUpdate();
+        display.clear();
+        display.printStr(0, 0, PSTR("NTP"));
+        display.drawPattern(display.width() - 7, 0, 7, 8, CLOCK);
+        display.endUpdate();
+      }
+      wifiTimer.detach();
+      logger.print(F("WiFi connected (IP "));
+      logger.print(WiFi.localIP());
+      logger.println(')');
+      http.begin();
+#ifdef LED_PIN
+      led.setMode(0, led.LED_IDLE);
+#endif
+      break;
+    case WIFI_EVENT_SOFTAPMODE_STACONNECTED:
+      logger.println(F("New AP client connected"));
+#ifdef LED_PIN
+      led.setMode(0, led.LED_CP1);
+#endif
+      break;
+    case WIFI_EVENT_SOFTAPMODE_STADISCONNECTED:
+      logger.println(F("AP client disconnected"));
+#ifdef LED_PIN
+      if (! WiFi.softAPgetStationNum())
+        led.setMode(0, led.LED_CP0);
+#endif
+      break;
+    default:
+      break;
   }
-  return 0;
+}
+
+static size_t encodeString(Print *out, const char *str, uint16_t len = 0) {
+  size_t result = 0;
+
+  while (*str) {
+    if (*str == '\'')
+      result += out->print(F("&apos;"));
+    else if (*str == '"')
+      result += out->print(F("&quot;"));
+    else if (*str == '<')
+      result += out->print(F("&lt;"));
+    else if (*str == '>')
+      result += out->print(F("&gt;"));
+    else if (*str == '&')
+      result += out->print(F("&amp;"));
+    else
+      result += out->print(*str);
+    if (len) {
+      if (! --len)
+        break;
+    }
+    ++str;
+  }
+  return result;
 }
 
 static bool isEvening(uint8_t h) {
-  if (EVENING_HOUR > MORNING_HOUR) {
-    return (h < MORNING_HOUR) || (h >= EVENING_HOUR);
+  if (config->evening_hour > config->morning_hour) {
+    return (h < config->morning_hour) || (h >= config->evening_hour);
   } else {
-    return (h >= EVENING_HOUR) && (h < MORNING_HOUR);
+    return (h >= config->evening_hour) && (h < config->morning_hour);
   }
 }
 
+static uint32_t ntpUpdating() {
+  if (*config->ntp_server) {
+    if (ntpUpdate(config->ntp_server, config->ntp_tz)) {
+      logger.println(F("NTP update successful"));
+      if (isEvening((ntpTime() / 3600) % 24))
+        display.setBrightness(config->evening_bright);
+      else
+        display.setBrightness(config->morning_bright);
+      return config->ntp_interval * 1000;
+    } else
+      return 5000; // 5 sec. to retry
+  } else // Remove action
+    return 0;
+}
+
+#ifdef USE_SHT3X
+static uint32_t shtUpdating() {
+  if (sht) {
+    if (! sht->measure(&temp, &hum)) {
+      logger.println(F("SHT3x read error!"));
+    }
+    return 2000; // 2 sec.
+  } else // Remove action
+    return 0;
+}
+#endif
+
+static bool webAuthorize(AsyncWebServerRequest *request) {
+  if ((WiFi.getMode() == WIFI_STA) && *config->adm_name && *config->adm_pswd) {
+    if (! request->authenticate(config->adm_name, config->adm_pswd)) {
+      request->requestAuthentication();
+      return false;
+    }
+  }
+  return true;
+}
+
+static void webNotFound(AsyncWebServerRequest *request) {
+  if ((WiFi.getMode() == WIFI_AP) && (! request->host().equals(WiFi.softAPIP().toString()))) { // Captive portal
+    request->redirect(String(F("http://")) + WiFi.softAPIP().toString());
+  } else {
+    request->send(404);
+  }
+}
+
+static void webRoot(AsyncWebServerRequest *request) {
+  AsyncResponseStream *response = request->beginResponseStream(FPSTR(TEXT_HTML));
+
+//  response->setCode(200);
+  response->print(FPSTR(HTML_PAGE_START));
+  response->print(F("WiFi Clock"));
+  response->print(FPSTR(HTML_PAGE_CONT));
+  response->print(FPSTR(HTML_STYLE_START));
+  response->print(F("body{background-color:#eee}\n"
+    "a{text-decoration:none;color:black;border:1px solid black;border-radius:10px 25px;padding:8px 16px}\n"));
+  response->print(FPSTR(HTML_STYLE_END));
+  response->print(FPSTR(HTML_BODY));
+  response->print(F("<h1>WiFi Clock</h1>\n"
+    "Uptime: "));
+  response->print(millis() / 1000);
+  response->print(F(" sec.</br>\n"
+    "Free heap: "));
+  response->print(ESP.getFreeHeap());
+  response->print(F(" bytes</br>\n"));
+#ifdef USE_SHT3X
+  if (sht && (! isnan(temp)) && (! isnan(hum))) {
+    response->printf_P(PSTR("SHT3x: %0.1f&deg; %0.1f%%</br>\n"), temp, hum);
+  }
+#endif
+  response->print(F("<p>\n"
+    "<a href='"));
+  response->print(FPSTR(URL_WIFI));
+  response->print(F("'>WiFi</a>\n"
+    "<a href='"));
+  response->print(FPSTR(URL_NTP));
+  response->print(F("'>NTP</a>\n"
+    "<a href='"));
+  response->print(FPSTR(URL_LOG));
+  response->print(F("'>Log</a>\n"));
+/*
+  response->print(F("<a href='"));
+  response->print(FPSTR(URL_RESET));
+  response->print('\'');
+  if (WiFi.getMode() == WIFI_STA)
+    response->print(F(" onclick='if(!confirm(\"Are you sure?\")) return false'"));
+  response->print(F(">Reset!</a>\n"));
+*/
+  response->print(F("<a href='"));
+  response->print(FPSTR(URL_RESTART));
+  response->print('\'');
+  if (WiFi.getMode() == WIFI_STA)
+    response->print(F(" onclick='if(!confirm(\"Are you sure?\")) return false'"));
+  response->print(F(">Restart!</a>\n"));
+  response->print(FPSTR(HTML_PAGE_END));
+  request->send(response);
+}
+
+static void webReset(AsyncWebServerRequest *request) {
+  if (! webAuthorize(request))
+    return;
+
+  AsyncResponseStream *response = request->beginResponseStream(FPSTR(TEXT_HTML));
+
+//  response->setCode(200);
+  response->print(FPSTR(HTML_PAGE_START));
+  response->print(F("Reset Config"));
+  response->print(FPSTR(HTML_PAGE_CONT));
+  response->print(F("<meta http-equiv=\"refresh\" content=\"3;URL=/\">\n"));
+  response->print(FPSTR(HTML_STYLE_START));
+  response->print(F("body{background-color:#eee}\n"));
+  response->print(FPSTR(HTML_STYLE_END));
+  response->print(FPSTR(HTML_BODY));
+  response->print(F("Configuration cleared.</br>\n"
+    "Don\'t forget to restart for the changes to take effect!\n"));
+  response->print(FPSTR(HTML_PAGE_END));
+  request->send(response);
+  config.clear();
+  logger.println(F("Configuration cleared"));
+  if (! config) {
+    if (! config.store()) {
+      logger.println(F("Error storing configuration!"));
+    }
+  }
+}
+
+static void webRestart(AsyncWebServerRequest *request) {
+  AsyncResponseStream *response = request->beginResponseStream(FPSTR(TEXT_HTML));
+
+//  response->setCode(200);
+  response->print(FPSTR(HTML_PAGE_START));
+  response->print(F("Restart"));
+  response->print(FPSTR(HTML_PAGE_CONT));
+  response->print(F("<meta http-equiv=\"refresh\" content=\"5;URL=/\">\n"));
+  response->print(FPSTR(HTML_STYLE_START));
+  response->print(F("body{background-color:#eee}\n"));
+  response->print(FPSTR(HTML_STYLE_END));
+  response->print(FPSTR(HTML_BODY));
+  response->print(F("Restarting...\n"));
+  response->print(FPSTR(HTML_PAGE_END));
+  request->send(response);
+  restarting = true;
+}
+
+static void webOta(AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
+  if (! index) {
+    logger.printf_P(PSTR("OTA update start: %s\n"), filename.c_str());
+    if (! Update.begin((ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000)) {
+      Update.printError(logger);
+    }
+  }
+  if (! Update.hasError()) {
+    if (Update.write(data, len) != len) {
+      Update.printError(logger);
+    }
+  }
+  if (final) {
+    if (Update.end(true)) {
+      logger.printf_P(PSTR("Update success: %u B\n"), index + len);
+    } else {
+      Update.printError(logger);
+    }
+  }
+}
+
+static void webStoreConfig(AsyncWebServerRequest *request) {
+  AsyncResponseStream *response = request->beginResponseStream(FPSTR(TEXT_HTML));
+  bool success = true;
+
+  if (! config) {
+    success = config.store();
+    if (! success) {
+      logger.println(F("Error storing configuration!"));
+    }
+  }
+  response->print(FPSTR(HTML_PAGE_START));
+  response->print(F("Store configuration"));
+  response->print(FPSTR(HTML_PAGE_CONT));
+  response->print(F("<meta http-equiv=\"refresh\" content=\"3;URL=/\">\n"));
+  response->print(FPSTR(HTML_STYLE_START));
+  response->print(F("body{background-color:#eee"));
+  if (! success) {
+    response->setCode(400);
+    response->print(F(";color:red"));
+  }
+  response->print(F("}\n"));
+  response->print(FPSTR(HTML_STYLE_END));
+  response->print(FPSTR(HTML_BODY));
+  if (success) {
+    response->print(F("Configuration stored.</br>\n"
+      "Don\'t forget to restart for the changes to take effect!\n"));
+  } else {
+    response->print(F("Error storing configuration!\n"));
+  }
+  response->print(FPSTR(HTML_PAGE_END));
+  request->send(response);
+}
+
+static void webWiFi(AsyncWebServerRequest *request) {
+  if (! webAuthorize(request))
+    return;
+
+  if (request->method() == HTTP_GET) {
+    AsyncResponseStream *response = request->beginResponseStream(FPSTR(TEXT_HTML));
+
+//    response->setCode(200);
+    response->print(FPSTR(HTML_PAGE_START));
+    response->print(F("WiFi Setup"));
+    response->print(FPSTR(HTML_PAGE_CONT));
+    response->print(FPSTR(HTML_STYLE_START));
+    response->print(F("body{background-color:#eee}\n"
+      "td:first-child{text-align:right}\n"));
+    response->print(FPSTR(HTML_STYLE_END));
+    response->print(FPSTR(HTML_BODY));
+    response->print(F("<h2>WiFi Setup</h2>\n"
+      "<form method='post'>\n"
+      "<table>\n"
+      "<tr><td>WiFi SSID:</td><td><input type='text' name='"));
+    response->print(FPSTR(PARAM_WIFI_SSID));
+    response->print(F("' value='"));
+    encodeString(response, config->wifi_ssid);
+    response->print(F("' size="));
+    response->print(_min(TEXT_SIZE, sizeof(config->wifi_ssid) - 1));
+    response->print(F(" maxlength="));
+    response->print(sizeof(config->wifi_ssid) - 1);
+    response->print(F("></td></tr>\n"
+      "<tr><td>WiFi password:</td><td><input type='password' name='"));
+    response->print(FPSTR(PARAM_WIFI_PSWD));
+    response->print(F("' value='"));
+    encodeString(response, config->wifi_pswd);
+    response->print(F("' size="));
+    response->print(_min(TEXT_SIZE, sizeof(config->wifi_pswd) - 1));
+    response->print(F(" maxlength="));
+    response->print(sizeof(config->wifi_pswd) - 1);
+    response->print(F("></td></tr>\n"
+      "<tr><td colspan=2>&nbsp;</td></tr>\n"
+      "<tr><td>Admin name:</td><td><input type='text' name='"));
+    response->print(FPSTR(PARAM_ADM_NAME));
+    response->print(F("' value='"));
+    encodeString(response, config->adm_name);
+    response->print(F("' size="));
+    response->print(_min(TEXT_SIZE, sizeof(config->adm_name) - 1));
+    response->print(F(" maxlength="));
+    response->print(sizeof(config->adm_name) - 1);
+    response->print(F("></td></tr>\n"
+      "<tr><td>Admin password:</td><td><input type='password' name='"));
+    response->print(FPSTR(PARAM_ADM_PSWD));
+    response->print(F("' value='"));
+    encodeString(response, config->adm_pswd);
+    response->print(F("' size="));
+    response->print(_min(TEXT_SIZE, sizeof(config->adm_pswd) - 1));
+    response->print(F(" maxlength="));
+    response->print(sizeof(config->adm_pswd) - 1);
+    response->print(F("></td></tr>\n"
+      "</table>\n"
+      "<input type='submit' value='Save'>\n"
+      "<input type='button' value='Back' onclick='location.href=\"/\"'>\n"
+      "</form>\n"));
+    response->print(FPSTR(HTML_PAGE_END));
+    request->send(response);
+  } else if (request->method() == HTTP_POST) {
+    AsyncWebParameter *param;
+
+    if ((param = request->getParam(FPSTR(PARAM_WIFI_SSID), true)))
+      strlcpy_P(config->wifi_ssid, param->value().c_str(), sizeof(config->wifi_ssid));
+    if ((param = request->getParam(FPSTR(PARAM_WIFI_PSWD), true)))
+      strlcpy_P(config->wifi_pswd, param->value().c_str(), sizeof(config->wifi_pswd));
+    if ((param = request->getParam(FPSTR(PARAM_ADM_NAME), true)))
+      strlcpy_P(config->adm_name, param->value().c_str(), sizeof(config->adm_name));
+    if ((param = request->getParam(FPSTR(PARAM_ADM_PSWD), true)))
+      strlcpy_P(config->adm_pswd, param->value().c_str(), sizeof(config->adm_pswd));
+    webStoreConfig(request);
+  } else {
+    request->send(405);
+  }
+}
+
+static void webNtp(AsyncWebServerRequest *request) {
+  if (! webAuthorize(request))
+    return;
+
+  if (request->method() == HTTP_GET) {
+    AsyncResponseStream *response = request->beginResponseStream(FPSTR(TEXT_HTML));
+
+//    response->setCode(200);
+    response->print(FPSTR(HTML_PAGE_START));
+    response->print(F("NTP Setup"));
+    response->print(FPSTR(HTML_PAGE_CONT));
+    response->print(FPSTR(HTML_STYLE_START));
+    response->print(F("body{background-color:#eee}\n"
+      "td:first-child{text-align:right}\n"));
+    response->print(FPSTR(HTML_STYLE_END));
+    response->print(FPSTR(HTML_SCRIPT_START));
+    response->print(FPSTR(JS_VALIDATE_INT));
+    response->print(FPSTR(HTML_SCRIPT_END));
+    response->print(FPSTR(HTML_BODY));
+    response->print(F("<h2>NTP Setup</h2>\n"
+      "<form method='post'>\n"
+      "<table>\n"
+      "<tr><td>NTP server:</td><td><input type='text' name='"));
+    response->print(FPSTR(PARAM_NTP_SERVER));
+    response->print(F("' value='"));
+    encodeString(response, config->ntp_server);
+    response->print(F("' size="));
+    response->print(_min(TEXT_SIZE, sizeof(config->ntp_server) - 1));
+    response->print(F(" maxlength="));
+    response->print(sizeof(config->ntp_server) - 1);
+    response->print(F("></td></tr>\n"
+      "<tr><td>Time zone:</td><td><select name='"));
+    response->print(FPSTR(PARAM_NTP_TZ));
+    response->print(F("'>"));
+    for (int8_t tz = -11; tz <= 13; ++tz) {
+      response->print(F("<option value='"));
+      response->print(tz);
+      response->print('\'');
+      if (config->ntp_tz == tz)
+        response->print(F(" selected"));
+      response->print(F(">GMT"));
+      if (tz >= 0)
+        response->print('+');
+      response->print(tz);
+      response->print(F("</option>"));
+    }
+    response->print(F("</select></td></tr>\n"
+      "<tr><td>Update interval (sec.):</td><td><input type='text' name='"));
+    response->print(FPSTR(PARAM_NTP_INTERVAL));
+    response->print(F("' value='"));
+    response->print(config->ntp_interval);
+    response->print(F("' size=5 maxlength=5 onblur='validateInt(this,0,65535)'></td></tr>\n"
+      "<tr><td colspan=2>&nbsp;</td></tr>\n"
+      "<tr><td>Morning hour:</td><td><input type='text' name='"));
+    response->print(FPSTR(PARAM_MORNING_HOUR));
+    response->print(F("' value='"));
+    response->print(config->morning_hour);
+    response->print(F("' size=2 maxlength=2 onblur='validateInt(this,0,23)'></td></tr>\n"
+      "<tr><td>Morning brightness:</td><td><input type='text' name='"));
+    response->print(FPSTR(PARAM_MORNING_BRIGHT));
+    response->print(F("' value='"));
+    response->print(config->morning_bright);
+    response->print(F("' size=2 maxlength=2 onblur='validateInt(this,0,15)'></td></tr>\n"
+      "<tr><td>Evening hour:</td><td><input type='text' name='"));
+    response->print(FPSTR(PARAM_EVENING_HOUR));
+    response->print(F("' value='"));
+    response->print(config->evening_hour);
+    response->print(F("' size=2 maxlength=2 onblur='validateInt(this,0,23)'></td></tr>\n"
+      "<tr><td>Evening brightness:</td><td><input type='text' name='"));
+    response->print(FPSTR(PARAM_EVENING_BRIGHT));
+    response->print(F("' value='"));
+    response->print(config->evening_bright);
+    response->print(F("' size=2 maxlength=2 onblur='validateInt(this,0,15)'></td></tr>\n"
+      "</table>\n"
+      "<input type='submit' value='Save'>\n"
+      "<input type='button' value='Back' onclick='location.href=\"/\"'>\n"
+      "</form>\n"));
+    response->print(FPSTR(HTML_PAGE_END));
+    request->send(response);
+  } else if (request->method() == HTTP_POST) {
+    AsyncWebParameter *param;
+
+    if ((param = request->getParam(FPSTR(PARAM_NTP_SERVER), true)))
+      strlcpy_P(config->ntp_server, param->value().c_str(), sizeof(config->ntp_server));
+    if ((param = request->getParam(FPSTR(PARAM_NTP_TZ), true)))
+      config->ntp_tz = constrain(param->value().toInt(), -11, 13);
+    if ((param = request->getParam(FPSTR(PARAM_NTP_INTERVAL), true)))
+      config->ntp_interval = param->value().toInt();
+    if ((param = request->getParam(FPSTR(PARAM_MORNING_HOUR), true)))
+      config->morning_hour = constrain(param->value().toInt(), 0, 23);
+    if ((param = request->getParam(FPSTR(PARAM_MORNING_BRIGHT), true)))
+      config->morning_bright = constrain(param->value().toInt(), 0, 15);
+    if ((param = request->getParam(FPSTR(PARAM_EVENING_HOUR), true)))
+      config->evening_hour = constrain(param->value().toInt(), 0, 23);
+    if ((param = request->getParam(FPSTR(PARAM_EVENING_BRIGHT), true)))
+      config->evening_bright = constrain(param->value().toInt(), 0, 15);
+    webStoreConfig(request);
+    if (isEvening((ntpTime() / 3600) % 24))
+      display.setBrightness(config->evening_bright);
+    else
+      display.setBrightness(config->morning_bright);
+  } else {
+    request->send(405);
+  }
+}
+
+static void webLog(AsyncWebServerRequest *request) {
+/*
+  if (! webAuthorize(request))
+    return;
+*/
+
+  if (request->method() == HTTP_GET) {
+    AsyncResponseStream *response = request->beginResponseStream(FPSTR(TEXT_HTML));
+
+//    response->setCode(200);
+    response->print(FPSTR(HTML_PAGE_START));
+    response->print(F("Log"));
+    response->print(FPSTR(HTML_PAGE_CONT));
+    response->print(FPSTR(HTML_STYLE_START));
+    response->print(F("body{background-color:#eee}\n"
+      "textarea{resize:none;overflow:auto;width:98%}\n"));
+    response->print(FPSTR(HTML_STYLE_END));
+    response->print(FPSTR(HTML_SCRIPT_START));
+    response->print(F("function logScroll(){\n"
+      "let l=document.getElementById('log');\n"
+      "l.scrollTop=l.scrollHeight;\n"
+      "}\n"));
+    response->print(FPSTR(HTML_SCRIPT_END));
+    response->print(FPSTR(HTML_BODY_START));
+    response->print(F("onload='logScroll()'>\n"
+      "<h2>Log</h2>\n"
+      "<textarea id='log' rows=25 readonly>\n"));
+    encodeString(response, (const char*)logger);
+    response->print(F("</textarea>\n"
+      "<form method='post'>\n"
+      "<input type='submit' value='Clear'>\n"
+      "<input type='button' value='Back' onclick='location.href=\"/\"'>\n"
+      "</form>\n"));
+    response->print(FPSTR(HTML_PAGE_END));
+    request->send(response);
+  } else if (request->method() == HTTP_POST) {
+    AsyncResponseStream *response = request->beginResponseStream(FPSTR(TEXT_HTML));
+
+//    response->setCode(200);
+    response->print(FPSTR(HTML_PAGE_START));
+    response->print(F("Clear Log"));
+    response->print(FPSTR(HTML_PAGE_CONT));
+    response->print(F("<meta http-equiv=\"refresh\" content=\"2;URL="));
+    response->print(FPSTR(URL_LOG));
+    response->print(F("\">\n"));
+    response->print(FPSTR(HTML_STYLE_START));
+    response->print(F("body{background-color:#eee}\n"));
+    response->print(FPSTR(HTML_STYLE_END));
+    response->print(FPSTR(HTML_BODY));
+    response->print(F("Log cleared\n"));
+    response->print(FPSTR(HTML_PAGE_END));
+    request->send(response);
+    logger.clear();
+    logger.println(F("Log cleared"));
+  } else {
+    request->send(405);
+  }
+}
+
+static bool captivePortal(uint32_t timeout = 0) {
+  DNSServer dns;
+  char ssid[sizeof(CP_SSID) + 6];
+  char pswd[sizeof(CP_PSWD)];
+  uint8_t mac[6];
+
+  WiFi.macAddress(mac);
+  sprintf_P(ssid, PSTR(CP_SSID"%02X%02X%02X"), mac[3], mac[4], mac[5]);
+  strcpy_P(pswd, PSTR(CP_PSWD));
+  WiFi.mode(WIFI_AP);
+  if (WiFi.softAP(ssid, pswd, 13)) {
+    logger.printf_P(PSTR("Please connect to CP \"%s\" with password \"%s\"\n"), ssid, pswd);
+  } else {
+    logger.println(F("CP init error!"));
+    return false;
+  }
+  dns.setErrorReplyCode(DNSReplyCode::NoError);
+  dns.start(53, F("*"), WiFi.softAPIP());
+  http.begin();
+#ifdef LED_PIN
+  led.setMode(0, led.LED_CP0);
+#endif
+  {
+    char str[64];
+
+    sprintf_P(str, PSTR("Connect to \"%s\" with password \"%s\"..."), ssid, pswd);
+    display.scroll(str, 50);
+  }
+  if (timeout) {
+    uint32_t start = millis();
+
+    while (millis() - start < timeout) {
+      if (restarting) {
+        delay(100);
+        restart(F("Restarting"));
+      }
+      if (WiFi.softAPgetStationNum())
+        start = millis();
+      dns.processNextRequest();
+      delay(1);
+    }
+  } else { // Infinite loop
+    while (true) {
+      if (restarting) {
+        delay(100);
+        restart(F("Restarting"));
+      }
+      dns.processNextRequest();
+      delay(1);
+    }
+  }
+  http.end();
+  WiFi.softAPdisconnect();
+#ifdef LED_PIN
+  led.setMode(0, led.LED_OFF);
+#endif
+  display.noScroll();
+  return true;
+}
+
+static uint32_t getRstCount() {
+  uint32_t rst_count[2];
+
+  ESP.rtcUserMemoryRead(0, rst_count, sizeof(rst_count));
+  if (~rst_count[0] == rst_count[1])
+    return rst_count[1];
+  return 0;
+}
+
+static uint32_t addRstCount() {
+  uint32_t rst_count[2];
+
+  ESP.rtcUserMemoryRead(0, rst_count, sizeof(rst_count));
+  if (~rst_count[0] == rst_count[1])
+    ++rst_count[1];
+  else
+    rst_count[1] = 1;
+  rst_count[0] = ~rst_count[1];
+  ESP.rtcUserMemoryWrite(0, rst_count, sizeof(rst_count));
+  return rst_count[1];
+}
+
+static void clearRstCount() {
+  uint32_t rst_count[2];
+
+  rst_count[1] = 0;
+  rst_count[0] = ~rst_count[1];
+  ESP.rtcUserMemoryWrite(0, rst_count, sizeof(rst_count));
+}
+
 void setup() {
+  if (ESP.getResetInfoPtr()->reason == REASON_EXT_SYS_RST)
+    addRstCount();
+
+#ifdef USE_SERIAL
   Serial.begin(115200);
   Serial.println();
+#endif
+
+#ifdef LED_PIN
+  led.add(LED_PIN, LED_LEVEL);
+#endif
+
+  if (! logger.begin())
+    restart(F("Not enoung memory!"));
+
+  if (! LittleFS.begin()) {
+    if ((! LittleFS.format()) || (! LittleFS.begin()))
+      restart(F("FS init fail!"));
+  }
+
+  config.onClear([&](config_t *cfg) {
+#ifdef DEF_WIFI_SSID
+    strlcpy_P(cfg->wifi_ssid, PSTR(DEF_WIFI_SSID), sizeof(config_t::wifi_ssid));
+#endif
+#ifdef DEF_WIFI_PSWD
+    strlcpy_P(cfg->wifi_pswd, PSTR(DEF_WIFI_PSWD), sizeof(config_t::wifi_pswd));
+#endif
+#ifdef DEF_ADM_NAME
+    strlcpy_P(cfg->adm_name, PSTR(DEF_ADM_NAME), sizeof(config_t::adm_name));
+#endif
+#ifdef DEF_ADM_PSWD
+    strlcpy_P(cfg->adm_pswd, PSTR(DEF_ADM_PSWD), sizeof(config_t::adm_pswd));
+#endif
+#ifdef DEF_NTP_SERVER
+    strlcpy_P(cfg->ntp_server, PSTR(DEF_NTP_SERVER), sizeof(config_t::ntp_server));
+#endif
+#ifdef DEF_NTP_TZ
+    cfg->ntp_tz = DEF_NTP_TZ;
+#endif
+#ifdef DEF_NTP_INTERVAL
+    cfg->ntp_interval = DEF_NTP_INTERVAL;
+#endif
+    cfg->morning_hour = 8;
+    cfg->morning_bright = 4;
+    cfg->evening_hour = 22;
+//    cfg->evening_bright = 0;
+  });
+  config.begin();
 
 #ifdef USE_SHT3X
   sht = new SHT3x<>();
@@ -159,79 +844,127 @@ void setup() {
   if (! sht->begin()) {
     delete sht;
     sht = nullptr;
-    Serial.println(F("SHT3x not found!"));
+    logger.println(F("SHT3x not found!"));
   }
 #endif
 
   display.init();
-  display.begin(HALF_BRIGHTNESS);
+  display.begin(config->evening_bright);
 //  display.scroll(PSTR("Hello!"));
-  display.scroll(PSTR("\xC7\xE4\xF0\xE0\xE2\xF1\xF2\xE2\xF3\xE9\xF2\xE5!")); // "Здравствуйте!"
-  delay(5000);
+  display.scroll(PSTR("\xC7\xE4\xF0\xE0\xE2\xF1\xF2\xE2\xF3\xE9\xF2\xE5!"), 50); // "Здравствуйте!"
+  delay(2500);
   display.clear();
-
-#ifdef USE_SHT3X
-  if (! sht) {
-    display.scroll(PSTR("\xCD\xE5\xF2 SHT3x!")); // "Нет SHT3x!"
-    delay(5000);
-    display.clear();
-  }
-#endif
 
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
   WiFi.onEvent(wifiOnEvent);
+
+  http.onNotFound(webNotFound);
+  http.on(URL_ROOT, HTTP_GET, webRoot);
+  http.on(URL_RESET, HTTP_GET, webReset);
+  http.on(URL_RESTART, HTTP_GET, webRestart);
+  http.on(URL_OTA, HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (! webAuthorize(request))
+      return;
+
+    request->send_P(200, FPSTR(TEXT_HTML), PSTR("<form method='post' enctype='multipart/form-data'>\n"
+      "<label>Firmware file:</label>\n"
+      "<input type='file' name='update' accept='.bin'></br>\n"
+      "<input type='submit' value='Update'>\n"
+      "<input type='button' value='Back' onclick='history.back()'>\n"
+      "</form>"));
+  });
+  http.on(URL_OTA, HTTP_POST, [](AsyncWebServerRequest *request) {
+    AsyncResponseStream *response = request->beginResponseStream(FPSTR(TEXT_HTML));
+
+    response->print(FPSTR(HTML_PAGE_START));
+    response->print(F("OTA"));
+    response->print(FPSTR(HTML_PAGE_CONT));
+    response->print(F("<meta http-equiv=\"refresh\" content=\"5;URL=/\">\n"));
+    response->print(FPSTR(HTML_STYLE_START));
+    response->print(F("body{background-color:#eee"));
+    if (Update.hasError()) {
+      response->setCode(400);
+      response->print(F(";color:red"));
+    }
+    response->print(F("}\n"));
+    response->print(FPSTR(HTML_STYLE_END));
+    response->print(FPSTR(HTML_BODY));
+    if (Update.hasError()) {
+      response->print(F("OTA error!\n"));
+    } else {
+      response->print(F("OTA successful</br>\n"
+        "Restarting...\n"));
+    }
+    response->print(FPSTR(HTML_PAGE_END));
+    request->send(response);
+    if (! Update.hasError()) {
+      restarting = true;
+    }
+  }, webOta);
+  http.on(URL_WIFI, HTTP_ANY, webWiFi);
+  http.on(URL_NTP, HTTP_ANY, webNtp);
+  http.on(URL_LOG, HTTP_ANY, webLog);
+  http.serveStatic(URL_ROOT, LittleFS, URL_ROOT);
+
+  if (getRstCount() >= RST_RESET) {
+    config.clear();
+    logger.println(F("Configuration cleared"));
+    if (! config) {
+      if (! config.store()) {
+        logger.println(F("Error storing configuration!"));
+      }
+    }
+    clearRstCount();
+    if (! captivePortal())
+      restart();
+  } else if ((! *config->wifi_ssid) || (getRstCount() >= RST_CP)) {
+    clearRstCount();
+/*
+    do {
+      if (! captivePortal(60000)) // 60 sec.
+        restart();
+    } while (! *config->wifi_ssid);
+*/
+    if (! captivePortal())
+      restart();
+  }
+  clearRstCount();
+
+  if (*config->ntp_server)
+    actions.add(ntpUpdating);
+#ifdef USE_SHT3X
+  actions.add(shtUpdating);
+#endif
+
+  wifiConnect();
 }
 
 void loop() {
   uint32_t t;
 
-  if ((! ntp_time) || ((int32_t)(ntp_next - millis()) <= 0)) {
-    if (mode == MODE_IDLE) {
-      wifiConnect(WIFI_SSID, WIFI_PSWD);
-    } else if (mode == MODE_NTP) {
-      t = ntpTime(NTP_SERVER, NTP_TZ);
-      if (t) {
-        ntp_time = t;
-        ntp_last = millis();
-        ntp_next = ntp_last + NTP_UPDATE;
-        Serial.println(F("NTP updated"));
-        if (isEvening((t / 3600) % 24))
-          display.setBrightness(HALF_BRIGHTNESS);
-        else
-          display.setBrightness(FULL_BRIGHTNESS);
-      } else {
-        ntp_next = millis() + NTP_REPEAT;
-        Serial.println(F("NTP fail!"));
-      }
-//      mode = MODE_IDLE;
-      WiFi.disconnect();
-    }
+  if (restarting) {
+    delay(100);
+    restart(F("Restarting"));
   }
+  if ((t = ntpTime())) {
+    uint16_t y;
+    uint8_t h, m, s, w, d, mo;
 
-  if (ntp_time) {
-    t = ntp_time + (millis() - ntp_last) / 1000;
-    if (t % 60 < 50) {
+    parseEpoch(t, &h, &m, &s, &w, &d, &mo, &y);
+
+    if (s < 50) {
       char str[12];
-#ifdef USE_SHT3X
-      float tp, hm;
-#endif
-      uint8_t h, m, s;
 
-      parseEpochTime(t, &h, &m, &s);
       if ((s <= 1) && (m == 0)) { // Beginning of hour
-        if (h == MORNING_HOUR)
-          display.setBrightness(FULL_BRIGHTNESS);
-        else if (h == EVENING_HOUR)
-          display.setBrightness(HALF_BRIGHTNESS);
+        if (h == config->morning_hour)
+          display.setBrightness(config->morning_bright);
+        else if (h == config->evening_hour)
+          display.setBrightness(config->evening_bright);
       }
 #ifdef USE_SHT3X
-      tp = hm = NAN;
-      if (sht && (((s >= 10) && (s < 20)) || ((s >= 30) && (s < 40)))) {
-        sht->measure(&tp, &hm);
-      }
-      if ((! isnan(tp)) && (! isnan(hm))) {
-        sprintf_P(str, PSTR("%0.1f\xB0 %0.1f%%"), tp, hm);
+      if (sht && (! isnan(temp)) && (! isnan(hum)) && (((s >= 10) && (s < 20)) || ((s >= 30) && (s < 40)))) {
+        sprintf_P(str, PSTR("%0.1f\xB0 %0.1f%%"), temp, hum);
         display.scroll(str);
         delay((10 - s % 10) * 1000);
         display.noScroll();
@@ -257,14 +990,13 @@ void loop() {
       };
 
       char str[15];
-      uint16_t y;
-      uint8_t w, d, m;
 
-      parseEpochDate(t, &w, &d, &m, &y);
-      sprintf_P(str, PSTR("%S %02u.%02u.%u"), WEEKDAYS[w], d, m, y);
+      strcpy_P(str, WEEKDAYS[w]);
+      sprintf_P(&str[strlen(str)], PSTR(" %02u.%02u.%u"), d, mo, y);
       display.scroll(str);
       delay((60 - t % 60) * 1000);
       display.noScroll();
     }
   }
+  actions.loop();
 }
