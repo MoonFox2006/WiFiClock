@@ -34,7 +34,7 @@ void parseEpoch(uint32_t epoch, uint8_t *hour, uint8_t *minute, uint8_t *second,
   bool leap;
 
   days = epoch / 24;
-  if (*weekday)
+  if (weekday)
     *weekday = (days + 3) % 7; // 1 Jan 1970 is Thursday
   if (days >= EPOCH_TIME_2022) {
     y = 2022;

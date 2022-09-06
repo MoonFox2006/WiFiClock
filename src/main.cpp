@@ -548,9 +548,6 @@ static void webNtp(AsyncWebServerRequest *request) {
     response->print(F("body{background-color:#eee}\n"
       "td:first-child{text-align:right}\n"));
     response->print(FPSTR(HTML_STYLE_END));
-    response->print(FPSTR(HTML_SCRIPT_START));
-    response->print(FPSTR(JS_VALIDATE_INT));
-    response->print(FPSTR(HTML_SCRIPT_END));
     response->print(FPSTR(HTML_BODY));
     response->print(F("<h2>NTP Setup</h2>\n"
       "<form method='post'>\n"
@@ -580,32 +577,32 @@ static void webNtp(AsyncWebServerRequest *request) {
       response->print(F("</option>"));
     }
     response->print(F("</select></td></tr>\n"
-      "<tr><td>Update interval (sec.):</td><td><input type='text' name='"));
+      "<tr><td>Update interval (sec.):</td><td><input type='number' name='"));
     response->print(FPSTR(PARAM_NTP_INTERVAL));
     response->print(F("' value='"));
     response->print(config->ntp_interval);
-    response->print(F("' size=5 maxlength=5 onblur='validateInt(this,0,65535)'></td></tr>\n"
+    response->print(F("' min=0 max=65535></td></tr>\n"
       "<tr><td colspan=2>&nbsp;</td></tr>\n"
-      "<tr><td>Morning hour:</td><td><input type='text' name='"));
+      "<tr><td>Morning hour:</td><td><input type='number' name='"));
     response->print(FPSTR(PARAM_MORNING_HOUR));
     response->print(F("' value='"));
     response->print(config->morning_hour);
-    response->print(F("' size=2 maxlength=2 onblur='validateInt(this,0,23)'></td></tr>\n"
-      "<tr><td>Morning brightness:</td><td><input type='text' name='"));
+    response->print(F("' min=0 max=23></td></tr>\n"
+      "<tr><td>Morning brightness:</td><td><input type='number' name='"));
     response->print(FPSTR(PARAM_MORNING_BRIGHT));
     response->print(F("' value='"));
     response->print(config->morning_bright);
-    response->print(F("' size=2 maxlength=2 onblur='validateInt(this,0,15)'></td></tr>\n"
-      "<tr><td>Evening hour:</td><td><input type='text' name='"));
+    response->print(F("' min=0 max=15></td></tr>\n"
+      "<tr><td>Evening hour:</td><td><input type='number' name='"));
     response->print(FPSTR(PARAM_EVENING_HOUR));
     response->print(F("' value='"));
     response->print(config->evening_hour);
-    response->print(F("' size=2 maxlength=2 onblur='validateInt(this,0,23)'></td></tr>\n"
-      "<tr><td>Evening brightness:</td><td><input type='text' name='"));
+    response->print(F("' min=0 max=23></td></tr>\n"
+      "<tr><td>Evening brightness:</td><td><input type='number' name='"));
     response->print(FPSTR(PARAM_EVENING_BRIGHT));
     response->print(F("' value='"));
     response->print(config->evening_bright);
-    response->print(F("' size=2 maxlength=2 onblur='validateInt(this,0,15)'></td></tr>\n"
+    response->print(F("' min=0 max=15></td></tr>\n"
       "</table>\n"
       "<input type='submit' value='Save'>\n"
       "<input type='button' value='Back' onclick='location.href=\"/\"'>\n"
@@ -918,7 +915,7 @@ void setup() {
     clearRstCount();
     if (! captivePortal())
       restart();
-  } else if ((! *config->wifi_ssid) || (getRstCount() >= RST_CP)) {
+  } else if ((! *config->wifi_ssid) || (! *config->ntp_server) || (getRstCount() >= RST_CP)) {
     clearRstCount();
 /*
     do {
