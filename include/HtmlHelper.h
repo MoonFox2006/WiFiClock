@@ -14,7 +14,7 @@ static const char HTML_PAGE_START[] PROGMEM = "<!DOCTYPE html>\n"
   "<head>\n"
   "<title>";
 static const char HTML_PAGE_CONT[] PROGMEM = "</title>\n"
-  "<meta charset=\"utf-8\">\n"
+  "<meta charset=\"Windows-1251\">\n"
   "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n";
 static const char HTML_STYLE_START[] PROGMEM = "<style>\n";
 static const char HTML_STYLE_END[] PROGMEM = "</style>\n";

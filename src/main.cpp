@@ -59,6 +59,7 @@ static const char PARAM_ADM_PSWD[] PROGMEM = "adm_pswd";
 static const char PARAM_NTP_SERVER[] PROGMEM = "ntp_serv";
 static const char PARAM_NTP_TZ[] PROGMEM = "ntp_tz";
 static const char PARAM_NTP_INTERVAL[] PROGMEM = "ntp_inter";
+static const char PARAM_GREETINGS[] PROGMEM = "greetings";
 static const char PARAM_MORNING_HOUR[] PROGMEM = "morning_hour";
 static const char PARAM_MORNING_BRIGHT[] PROGMEM = "morning_bright";
 static const char PARAM_EVENING_HOUR[] PROGMEM = "evening_hour";
@@ -82,6 +83,7 @@ struct __attribute__((__packed__)) config_t {
   char ntp_server[32 + 1];
   int8_t ntp_tz;
   uint16_t ntp_interval; // in sec.
+  char greetings[15 + 1];
   uint8_t morning_hour;
   uint8_t morning_bright;
   uint8_t evening_hour;
@@ -135,6 +137,13 @@ static void restart(const __FlashStringHelper *msg = nullptr) {
 #endif
   ESP.restart();
 }
+
+/*
+static void strlcpy(char *dest, const char *src, size_t size) {
+  strncpy(dest, src, size - 1);
+  dest[size - 1] = '\0';
+}
+*/
 
 static void strlcpy_P(char *dest, PGM_P src, size_t size) {
   strncpy_P(dest, src, size - 1);
@@ -520,13 +529,13 @@ static void webWiFi(AsyncWebServerRequest *request) {
     AsyncWebParameter *param;
 
     if ((param = request->getParam(FPSTR(PARAM_WIFI_SSID), true)))
-      strlcpy_P(config->wifi_ssid, param->value().c_str(), sizeof(config->wifi_ssid));
+      strlcpy(config->wifi_ssid, param->value().c_str(), sizeof(config->wifi_ssid));
     if ((param = request->getParam(FPSTR(PARAM_WIFI_PSWD), true)))
-      strlcpy_P(config->wifi_pswd, param->value().c_str(), sizeof(config->wifi_pswd));
+      strlcpy(config->wifi_pswd, param->value().c_str(), sizeof(config->wifi_pswd));
     if ((param = request->getParam(FPSTR(PARAM_ADM_NAME), true)))
-      strlcpy_P(config->adm_name, param->value().c_str(), sizeof(config->adm_name));
+      strlcpy(config->adm_name, param->value().c_str(), sizeof(config->adm_name));
     if ((param = request->getParam(FPSTR(PARAM_ADM_PSWD), true)))
-      strlcpy_P(config->adm_pswd, param->value().c_str(), sizeof(config->adm_pswd));
+      strlcpy(config->adm_pswd, param->value().c_str(), sizeof(config->adm_pswd));
     webStoreConfig(request);
   } else {
     request->send(405);
@@ -583,6 +592,15 @@ static void webNtp(AsyncWebServerRequest *request) {
     response->print(config->ntp_interval);
     response->print(F("' min=0 max=65535></td></tr>\n"
       "<tr><td colspan=2>&nbsp;</td></tr>\n"
+      "<tr><td>Greetings:</td><td><input type='text' name='"));
+    response->print(FPSTR(PARAM_GREETINGS));
+    response->print(F("' value='"));
+    encodeString(response, config->greetings);
+    response->print(F("' size="));
+    response->print(_min(TEXT_SIZE, sizeof(config->greetings) - 1));
+    response->print(F(" maxlength="));
+    response->print(sizeof(config->greetings) - 1);
+    response->print(F("></td></tr>\n"
       "<tr><td>Morning hour:</td><td><input type='number' name='"));
     response->print(FPSTR(PARAM_MORNING_HOUR));
     response->print(F("' value='"));
@@ -613,11 +631,13 @@ static void webNtp(AsyncWebServerRequest *request) {
     AsyncWebParameter *param;
 
     if ((param = request->getParam(FPSTR(PARAM_NTP_SERVER), true)))
-      strlcpy_P(config->ntp_server, param->value().c_str(), sizeof(config->ntp_server));
+      strlcpy(config->ntp_server, param->value().c_str(), sizeof(config->ntp_server));
     if ((param = request->getParam(FPSTR(PARAM_NTP_TZ), true)))
       config->ntp_tz = constrain(param->value().toInt(), -11, 13);
     if ((param = request->getParam(FPSTR(PARAM_NTP_INTERVAL), true)))
       config->ntp_interval = param->value().toInt();
+    if ((param = request->getParam(FPSTR(PARAM_GREETINGS), true)))
+      strlcpy(config->greetings, param->value().c_str(), sizeof(config->greetings));
     if ((param = request->getParam(FPSTR(PARAM_MORNING_HOUR), true)))
       config->morning_hour = constrain(param->value().toInt(), 0, 23);
     if ((param = request->getParam(FPSTR(PARAM_MORNING_BRIGHT), true)))
@@ -828,6 +848,7 @@ void setup() {
 #ifdef DEF_NTP_INTERVAL
     cfg->ntp_interval = DEF_NTP_INTERVAL;
 #endif
+    strlcpy_P(cfg->greetings, PSTR("\xC7\xE4\xF0\xE0\xE2\xF1\xF2\xE2\xF3\xE9\xF2\xE5!"), sizeof(config_t::greetings)); // "Здравствуйте!"
     cfg->morning_hour = 8;
     cfg->morning_bright = 4;
     cfg->evening_hour = 22;
@@ -847,9 +868,9 @@ void setup() {
 
   display.init();
   display.begin(config->evening_bright);
-//  display.scroll(PSTR("Hello!"));
-  display.scroll(PSTR("\xC7\xE4\xF0\xE0\xE2\xF1\xF2\xE2\xF3\xE9\xF2\xE5!"), 50); // "Здравствуйте!"
-  delay(2500);
+  display.scroll(config->greetings, 50);
+  delay(3000);
+  display.noScroll();
   display.clear();
 
   WiFi.persistent(false);
