@@ -680,7 +680,7 @@ static void webLog(AsyncWebServerRequest *request) {
       "}\n"));
     response->print(FPSTR(HTML_SCRIPT_END));
     response->print(FPSTR(HTML_BODY_START));
-    response->print(F("onload='logScroll()'>\n"
+    response->print(F(" onload='logScroll()'>\n"
       "<h2>Log</h2>\n"
       "<textarea id='log' rows=25 readonly>\n"));
     encodeString(response, (const char*)logger);
