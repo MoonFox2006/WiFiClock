@@ -12,6 +12,7 @@
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
 #include <DNSServer.h>
+#include <ESP8266LLMNR.h>
 #include <ESPAsyncWebServer.h>
 #include "Parameters.h"
 #include "Logger.h"
@@ -45,6 +46,7 @@
 //#define DEF_WIFI_PSWD   "YOUR_PSWD"
 #define DEF_ADM_NAME    "admin"
 #define DEF_ADM_PSWD    "12345678"
+#define DEF_LLMNR_NAME  "WiFiClock"
 #define DEF_NTP_SERVER  "pool.ntp.org"
 #define DEF_NTP_TZ      3
 #define DEF_NTP_INTERVAL  (3600 * 4)
@@ -56,6 +58,7 @@ static const char PARAM_WIFI_SSID[] PROGMEM = "wifi_ssid";
 static const char PARAM_WIFI_PSWD[] PROGMEM = "wifi_pswd";
 static const char PARAM_ADM_NAME[] PROGMEM = "adm_name";
 static const char PARAM_ADM_PSWD[] PROGMEM = "adm_pswd";
+static const char PARAM_LLMNR_NAME[] PROGMEM = "llmnr_name";
 static const char PARAM_NTP_SERVER[] PROGMEM = "ntp_serv";
 static const char PARAM_NTP_TZ[] PROGMEM = "ntp_tz";
 static const char PARAM_NTP_INTERVAL[] PROGMEM = "ntp_inter";
@@ -80,6 +83,7 @@ struct __attribute__((__packed__)) config_t {
   char wifi_pswd[32 + 1];
   char adm_name[32 + 1];
   char adm_pswd[32 + 1];
+  char llmnr_name[32 + 1];
   char ntp_server[32 + 1];
   int8_t ntp_tz;
   uint16_t ntp_interval; // in sec.
@@ -137,13 +141,6 @@ static void restart(const __FlashStringHelper *msg = nullptr) {
 #endif
   ESP.restart();
 }
-
-/*
-static void strlcpy(char *dest, const char *src, size_t size) {
-  strncpy(dest, src, size - 1);
-  dest[size - 1] = '\0';
-}
-*/
 
 static void strlcpy_P(char *dest, PGM_P src, size_t size) {
   strncpy_P(dest, src, size - 1);
@@ -519,6 +516,16 @@ static void webWiFi(AsyncWebServerRequest *request) {
     response->print(F(" maxlength="));
     response->print(sizeof(config->adm_pswd) - 1);
     response->print(F("></td></tr>\n"
+      "<tr><td colspan=2>&nbsp;</td></tr>\n"
+      "<tr><td>LLMNR host name:</td><td><input type='text' name='"));
+    response->print(FPSTR(PARAM_LLMNR_NAME));
+    response->print(F("' value='"));
+    encodeString(response, config->llmnr_name);
+    response->print(F("' size="));
+    response->print(_min(TEXT_SIZE, sizeof(config->llmnr_name) - 1));
+    response->print(F(" maxlength="));
+    response->print(sizeof(config->llmnr_name) - 1);
+    response->print(F("></td></tr>\n"
       "</table>\n"
       "<input type='submit' value='Save'>\n"
       "<input type='button' value='Back' onclick='location.href=\"/\"'>\n"
@@ -536,6 +543,8 @@ static void webWiFi(AsyncWebServerRequest *request) {
       strlcpy(config->adm_name, param->value().c_str(), sizeof(config->adm_name));
     if ((param = request->getParam(FPSTR(PARAM_ADM_PSWD), true)))
       strlcpy(config->adm_pswd, param->value().c_str(), sizeof(config->adm_pswd));
+    if ((param = request->getParam(FPSTR(PARAM_LLMNR_NAME), true)))
+      strlcpy(config->llmnr_name, param->value().c_str(), sizeof(config->llmnr_name));
     webStoreConfig(request);
   } else {
     request->send(405);
@@ -839,6 +848,9 @@ void setup() {
 #ifdef DEF_ADM_PSWD
     strlcpy_P(cfg->adm_pswd, PSTR(DEF_ADM_PSWD), sizeof(config_t::adm_pswd));
 #endif
+#ifdef DEF_LLMNR_NAME
+    strlcpy_P(cfg->llmnr_name, PSTR(DEF_LLMNR_NAME), sizeof(config_t::llmnr_name));
+#endif
 #ifdef DEF_NTP_SERVER
     strlcpy_P(cfg->ntp_server, PSTR(DEF_NTP_SERVER), sizeof(config_t::ntp_server));
 #endif
@@ -954,6 +966,11 @@ void setup() {
 #ifdef USE_SHT3X
   actions.add(shtUpdating);
 #endif
+
+  if (*config->llmnr_name) {
+    if (! LLMNR.begin(config->llmnr_name))
+      logger.println(F("LLMNR init fail!"));
+  }
 
   wifiConnect();
 }
